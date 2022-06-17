@@ -49,6 +49,7 @@ import math
 import os
 import random
 import re
+from string import ascii_letters, digits
 import subprocess
 from textwrap import dedent
 import uuid
@@ -1904,3 +1905,154 @@ def update_selected_question():
         selector_id=selector_id,
         sid=sid,
     )
+
+@auth.requires_login()
+def create_collab_room():
+    try:
+        course = request.vars.course
+        activity = request.vars.activity
+        owner = request.vars.owner
+        room_name = request.vars.room_name
+
+        # could probably use auth to see if course is valid
+        if course != auth.user.course_name:
+            response.status = 403
+            return json.dumps({
+                "error": "User's current course does not match the target course",
+            })
+
+        # check to see if a room exists with the same name
+        #   for the same course, activity combo
+        tbl = db.collab_open_rooms
+
+        query = (
+            (tbl.course_name == course)
+            & (tbl.activity == activity)
+            & (tbl.room_name == room_name)
+        )
+
+        rows = db(query).select()
+        if len(rows):
+            response.status = 409
+            return json.dumps({
+                "error": "Room already exists",
+            })
+
+        conn_pass = ''.join(random.choice(ascii_letters + digits) for _ in range(64))
+        tbl.insert(course_name=course, activity=activity, owner=owner,
+                room_name=room_name, conn_pass=conn_pass)
+
+        response.status = 201
+        return json.dumps({
+            "connPass": conn_pass,
+        })
+
+    except Exception as e:
+        response.status = 400
+        return json.dumps({
+            "what": repr(e),
+        })
+
+@auth.requires_login()
+def end_collab_room():
+    try:
+        course = request.vars.course
+        activity = request.vars.activity
+        owner = request.vars.owner
+        room_name = request.vars.room_name
+
+        # could probably use auth to see if course is valid
+        if course != auth.user.course_name:
+            response.status = 403
+            return json.dumps({
+                "error": "User's current course does not match the target course",
+            })
+
+        # check to see if a room exists with the same name
+        #   for the same course, activity combo
+        tbl = db.collab_open_rooms
+
+        query = (
+            (tbl.course_name == course)
+            & (tbl.activity == activity)
+            & (tbl.room_name == room_name)
+            & (tbl.owner == owner)
+        )
+
+        rows = db(query).select()
+        if not len(rows):
+            return json.dumps({
+                "status": "Room to close was not found",
+            })
+
+        rows.first().delete_record()
+        return json.dumps({
+            "status": "Successfully closed room",
+        })
+
+    except Exception as e:
+        response.status = 400
+        return json.dumps({
+            "what": repr(e),
+        })
+
+@auth.requires_login()
+def join_collab_room():
+    try:
+        course = request.vars.course
+        activity = request.vars.activity
+        room_name = request.vars.room_name
+
+        # could probably use auth to see if course is valid
+        if course != auth.user.course_name:
+            response.status = 403
+            return json.dumps({
+                "error": "User's current course does not match the target course",
+            })
+
+        # check to see if a room exists with the same name
+        #   for the same course, activity combo
+        tbl = db.collab_open_rooms
+
+        query = (
+            (tbl.course_name == course)
+            & (tbl.activity == activity)
+            & (tbl.room_name == room_name)
+        )
+
+        rows = db(query).select()
+        if not len(rows):
+            response.status = 400
+            return json.dumps({
+                "error": "Target room does not exist",
+            })
+
+        conn_pass = rows.first().conn_pass
+
+        response.status = 201
+        return json.dumps({
+            "connPass": conn_pass,
+        })
+
+    except Exception as e:
+        response.status = 400
+        return json.dumps({
+            "error": repr(e),
+        })
+
+@auth.requires_login()
+def leave_collab_room():
+    pass
+
+
+def debug_endpoint():
+    try:
+        pass
+    except Exception as e:
+        return json.dumps({
+            "status": "fail",
+            "what": repr(e),
+        })
+    return json.dumps({
+        "auth": repr(auth),
+    })
