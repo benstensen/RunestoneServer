@@ -57,32 +57,29 @@ function connect(event) {
                             } else {
                                 messarea.innerHTML = `<h3>Please Give an explanation for your answer</h3><p>Then discuss your answer with your group members</p>`;
                             }
-                            window.mcList[currentQuestion].submitButton.disabled = true;
-                            window.mcList[currentQuestion].disableInteraction();
+                            if (!eBookConfig.isInstructor) {
+                                window.mcList[
+                                    currentQuestion
+                                ].submitButton.disabled = true;
+                                window.mcList[currentQuestion].disableInteraction();
+                            }
                             clearInterval(itimerid);
                             // Get the current answer and insert it into the
                             let ansSlot = document.getElementById("first_answer");
                             const ordA = 65;
                             if (typeof currAnswer !== "undefined") {
-                                if (currAnswer.indexOf(",") > -1) {
-                                    let alist = currAnswer.split(",");
-                                    let nlist = [];
-                                    for (let x of alist) {
-                                        nlist.push(
-                                            String.fromCharCode(ordA + parseInt(x))
-                                        );
-                                    }
-                                    currAnswer = nlist.join(",");
-                                } else {
-                                    currAnswer = String.fromCharCode(
-                                        ordA + parseInt(currAnswer)
-                                    );
-                                }
+                                currAnswer = answerToString(currAnswer);
                                 ansSlot.innerHTML = currAnswer;
                             }
                             // send log message to indicate voting is over
                             if (typeof voteNum !== "undefined" && voteNum == 2) {
-                                await logStopVote();
+                                logPeerEvent({
+                                    sid: eBookConfig.username,
+                                    div_id: currentQuestion,
+                                    event: "peer",
+                                    act: "stop_question",
+                                    course: eBookConfig.course,
+                                });
                             }
                         }
                     }, 1000);
@@ -91,6 +88,9 @@ function connect(event) {
                     window.mcList[currentQuestion].submitButton.disabled = false;
                     window.mcList[currentQuestion].submitButton.innerHTML = "Submit";
                     window.mcList[currentQuestion].enableInteraction();
+                    if (typeof studentVoteCount !== "undefined") {
+                        studentVoteCount += 1;
+                    }
                     messarea = document.getElementById("imessage");
                     messarea.innerHTML = `<h3>Time to make your 2nd vote</h3>`;
                     $("[type=radio]").prop("checked", false);
@@ -136,20 +136,29 @@ function connect(event) {
     };
 }
 
-async function logStopVote() {
+function answerToString(currAnswer) {
+    const ordA = 65;
+    if (currAnswer.indexOf(",") > -1) {
+        let alist = currAnswer.split(",");
+        let nlist = [];
+        for (let x of alist) {
+            nlist.push(String.fromCharCode(ordA + parseInt(x)));
+        }
+        currAnswer = nlist.join(",");
+    } else {
+        currAnswer = String.fromCharCode(ordA + parseInt(currAnswer));
+    }
+    console.log(`returning ${currAnswer}`);
+    return currAnswer;
+}
+
+async function logPeerEvent(eventInfo) {
     // This can be refactored to take some parameters if peer grows
     // to require more logging functionality.
     let headers = new Headers({
         "Content-type": "application/json; charset=utf-8",
         Accept: "application/json",
     });
-    let eventInfo = {
-        sid: eBookConfig.username,
-        div_id: currentQuestion,
-        event: "peer",
-        act: "stop_question",
-        course: eBookConfig.course,
-    };
     let request = new Request(eBookConfig.ajaxURL + "hsblog", {
         method: "POST",
         headers: headers,
@@ -330,6 +339,50 @@ async function ratePeer(radio) {
         alert(`Error: Your action was not saved! The error was ${e}`);
         console.log(`Error: ${e}`);
     }
+}
+
+// This function is only for use with the async mode of peer instruction
+//
+async function showPeerEnableVote2() {
+    // Log the justification from this student
+    let mess = document.getElementById("messageText").value;
+
+    await logPeerEvent({
+        sid: eBookConfig.username,
+        div_id: currentQuestion,
+        event: "sendmessage",
+        act: `to:system:${mess}`,
+        course: eBookConfig.course,
+    });
+
+    // send a request to get a peer response and display it.
+    let data = {
+        div_id: currentQuestion,
+        course: eBookConfig.course,
+    };
+    let jsheaders = new Headers({
+        "Content-type": "application/json; charset=utf-8",
+        Accept: "application/json",
+    });
+    let request = new Request("/runestone/peer/get_async_explainer", {
+        method: "POST",
+        headers: jsheaders,
+        body: JSON.stringify(data),
+    });
+    let resp = await fetch(request);
+    if (!resp.ok) {
+        alert(`Error getting a justification ${resp.statusText}`);
+    }
+    let spec = await resp.json();
+    let peerMess = spec.mess;
+    let peerNameEl = document.getElementById("peerName");
+    peerNameEl.innerHTML = `User ${spec.user} answered ${answerToString(spec.answer)}`;
+    let peerEl = document.getElementById("peerJust");
+    peerEl.innerHTML = peerMess;
+    let nextStep = document.getElementById("nextStep");
+    nextStep.innerHTML =
+        "Please Answer the question again.  Even if you do not wish to change your answer.  After answering click the button to go on to the next question.";
+    $("[type=radio]").prop("checked", false);
 }
 
 $(function () {

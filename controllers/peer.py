@@ -52,6 +52,8 @@ def instructor():
     )
 
 
+# Instructor's interface to peer
+# ------------------------------
 @auth.requires(
     lambda: verifyInstructorStatus(auth.user.course_id, auth.user),
     requires_login=True,
@@ -77,8 +79,18 @@ def dashboard():
         act="start_question",
         timestamp=datetime.datetime.utcnow(),
     )
+
     r = redis.from_url(os.environ.get("REDIS_URI", "redis://redis:6379/0"))
     r.hset(f"{auth.user.course_name}_state", "mess_count", "0")
+    mess = {
+        "sender": auth.user.username,
+        "type": "control",
+        "message": "enableNext",
+        "broadcast": True,
+        "course_name": auth.user.course_name,
+    }
+    r.publish("peermessages", json.dumps(mess))
+
     return dict(
         course_id=auth.user.course_name,
         course=get_course_row(db.courses.ALL),
@@ -100,14 +112,18 @@ def _get_current_question(assignment_id, get_next):
         db(db.assignments.id == assignment_id).update(current_index=idx)
     else:
         idx = assignment.current_index
+    db.commit()  # commit changes to current question to prevent race condition.
+    return _get_numbered_question(assignment_id, idx)
 
+
+def _get_numbered_question(assignment_id, qnum):
     a_qs = db(db.assignment_questions.assignment_id == assignment_id).select(
         orderby=[db.assignment_questions.sorting_priority, db.assignment_questions.id]
     )
-    logger.debug(f"idx = {idx} len of qs = {len(a_qs)}")
-    if idx > len(a_qs) - 1:
-        idx = len(a_qs) - 1
-    current_question_id = a_qs[idx].question_id
+    if qnum > len(a_qs) - 1:
+        qnum = len(a_qs) - 1
+
+    current_question_id = a_qs[qnum].question_id
     current_question = db(db.questions.id == current_question_id).select().first()
 
     return current_question
@@ -271,6 +287,8 @@ def student():
     )
 
 
+# Student's Interface to Peer Instruction
+# ---------------------------------------
 @auth.requires_login()
 def peer_question():
     if "access_token" not in request.cookies:
@@ -288,6 +306,23 @@ def peer_question():
     )
 
 
+def find_good_partner(group, peeps, answer_dict):
+    # try to find a partner with a different answer than the first group member
+    logger.debug(f"here {group}, {peeps}, {answer_dict}")
+    ans = answer_dict[group[0]]
+    i = 0
+    while i < len(peeps) and answer_dict[peeps[i]] == ans:
+        logger.debug(f"{i} : {peeps[i]}")
+        i += 1
+
+    logger.debug("made it")
+    if i < len(peeps):
+        logger.debug("made it 2")
+        return peeps.pop(i)
+    else:
+        return peeps.pop()
+
+
 @auth.requires(
     lambda: verifyInstructorStatus(auth.user.course_id, auth.user),
     requires_login=True,
@@ -297,38 +332,33 @@ def make_pairs():
     div_id = request.vars.div_id
     df = _get_lastn_answers(1, div_id, auth.user.course_name, request.vars.start_time)
     group_size = int(request.vars.get("group_size", 2))
-    logger.debug(f"STARTING to make pairs for {auth.user.course_name}")
-    # answers = list(df.answer.unique())
-    correct = df[df.correct == "T"][["sid", "answer"]]
-    # answers.remove(correct.iloc[0].answer)
-    correct_list = correct.sid.to_list()
-    incorrect = df[df.correct == "F"][["sid", "answer"]]
-    incorrect_list = incorrect.sid.to_list()
-    logger.debug(f"CL = {correct_list}")
-    logger.debug(f"ICL = {incorrect_list}")
-    if auth.user.username in correct_list:
-        correct_list.remove(auth.user.username)
-    if auth.user.username in incorrect_list:
-        incorrect_list.remove(auth.user.username)
     r = redis.from_url(os.environ.get("REDIS_URI", "redis://redis:6379/0"))
     logger.debug(f"Clearing partnerdb_{auth.user.course_name}")
     r.delete(f"partnerdb_{auth.user.course_name}")
 
+    logger.debug(f"STARTING to make pairs for {auth.user.course_name}")
     done = False
     peeps = df.sid.to_list()
+    sid_ans = df.set_index("sid")["answer"].to_dict()
+
+    if auth.user.username in peeps:
+        peeps.remove(auth.user.username)
     random.shuffle(peeps)
     group_list = []
     while not done:
-        group = []
-        for i in range(group_size):
+        group = [peeps.pop()]
+        for i in range(group_size - 1):
             try:
-                group.append(peeps.pop())
+                group.append(find_good_partner(group, peeps, sid_ans))
             except IndexError:
+                logger.debug("except")
                 done = True
         if len(group) == 1:
             group_list[-1].append(group[0])
         else:
             group_list.append(group)
+        if len(peeps) == 0:
+            done = True
 
     gdict = {}
     for group in group_list:
@@ -341,18 +371,17 @@ def make_pairs():
         r.hset(f"partnerdb_{auth.user.course_name}", k, json.dumps(v))
     r.hset(f"{auth.user.course_name}_state", "mess_count", "0")
     logger.debug(f"DONE makeing pairs for {auth.user.course_name} {gdict}")
-    _broadcast_peer_answers(correct, incorrect)
+    _broadcast_peer_answers(sid_ans)
     logger.debug(f"DONE broadcasting pair information")
     return json.dumps("success")
 
 
-def _broadcast_peer_answers(correct, incorrect):
+def _broadcast_peer_answers(answers):
     """
     The correct and incorrect lists are dataframes that containe the sid and their answer
     We want to iterate over the
     """
-    df = pd.concat([correct, incorrect])
-    answers = dict(zip(df.sid, df.answer))
+
     r = redis.from_url(os.environ.get("REDIS_URI", "redis://redis:6379/0"))
     for p1, p2 in r.hgetall(f"partnerdb_{auth.user.course_name}").items():
         p1 = p1.decode("utf8")
@@ -416,3 +445,126 @@ def log_peer_rating():
         retmess = "success"
 
     return json.dumps(retmess)
+
+
+# Students Async Interface to Peer Instruction
+# --------------------------------------------
+
+
+@auth.requires_login()
+def peer_async():
+    if "access_token" not in request.cookies:
+        return redirect(URL("default", "accessIssue"))
+
+    assignment_id = request.vars.assignment_id
+
+    qnum = 0
+    if request.vars.question_num:
+        qnum = int(request.vars.question_num)
+
+    current_question = _get_numbered_question(assignment_id, qnum)
+
+    return dict(
+        course_id=auth.user.course_name,
+        course=get_course_row(db.courses.ALL),
+        current_question=current_question,
+        assignment_id=assignment_id,
+        nextQnum=qnum + 1,
+    )
+
+
+@auth.requires_login()
+def get_async_explainer():
+    course_name = request.vars.course
+    sid = auth.user.username
+    div_id = request.vars.div_id
+
+    this_answer = _get_user_answer(div_id, sid)
+
+    # Messages are in useinfo with an event of "sendmessage" and a div_id corresponding to the div_id of the question.
+    # The act field is to:user:message
+    # Ratings of messages are in useinfo with an event of "ratepeer"
+    # the act field is rateduser:rating (excellent, good, poor)
+    ratings = []
+    for rate in ["excellent", "good"]:
+        ratings = db(
+            (db.useinfo.event == "ratepeer")
+            & (db.useinfo.act.like(f"%{rate}"))
+            & (db.useinfo.div_id == div_id)
+            & (db.useinfo.course_id == course_name)
+        ).select()
+        if len(ratings) > 0:
+            break
+
+    if len(ratings) > 0:
+        done = False
+        tries = 0
+        while not done and tries < 10:
+            idx = random.randrange(len(ratings))
+            act = ratings[idx].act
+            user = act.split(":")[0]
+            peer_answer = _get_user_answer(div_id, user)
+            if peer_answer != this_answer:
+                done = True
+            else:
+                tries += 1
+        mess = _get_user_messages(user, div_id, course_name)
+    else:
+        messages = db(
+            (db.useinfo.event == "sendmessage")
+            & (db.useinfo.div_id == div_id)
+            & (db.useinfo.course_id == course_name)
+        ).select(db.useinfo.sid)
+        if len(messages) > 0:
+            senders = set((row.sid for row in messages))
+            done = False
+            tries = 0
+            while not done and tries < 10:
+                user = random.choice(list(senders))
+                peer_answer = _get_user_answer(div_id, user)
+                if peer_answer != this_answer:
+                    done = True
+                else:
+                    tries += 1
+            mess = _get_user_messages(user, div_id, course_name)
+        else:
+            mess = "Sorry there were no good explanations for you."
+            user = "nobody"
+
+    logger.debug(f"Get message for {div_id}")
+    return json.dumps({"mess": mess, "user": user, "answer": peer_answer})
+
+
+def _get_user_answer(div_id, s):
+    ans = (
+        db(
+            (db.useinfo.event == "mChoice")
+            & (db.useinfo.sid == s)
+            & (db.useinfo.div_id == div_id)
+            & (db.useinfo.act.like("%vote1"))
+        )
+        .select(orderby=~db.useinfo.id)
+        .first()
+    )
+    # act is answer:0[,x]+:correct:voteN
+    if ans:
+        return ans.act.split(":")[1]
+    else:
+        return ""
+
+
+def _get_user_messages(user, div_id, course_name):
+    messages = db(
+        (db.useinfo.event == "sendmessage")
+        & (db.useinfo.sid == user)
+        & (db.useinfo.div_id == div_id)
+        & (db.useinfo.course_id == course_name)
+    ).select(orderby=db.useinfo.id)
+    user = messages[0].sid
+    mess = "<ul>"
+    for row in messages:
+        mpart = row.act.split(":")[2]
+        mess += f"<li>{mpart}</li>"
+    mess += "</ul>"
+
+    return mess

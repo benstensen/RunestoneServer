@@ -1,0 +1,65 @@
+{{extend 'layout.html'}} 
+{{block moreincludes}} 
+{{include '_sphinx_static_files.html'}}
+{{end}}
+
+<script>
+    eBookConfig.peer = true;
+    eBookConfig.peerMOde = "async";
+</script>
+
+<h2>Peer Instruction Question (Async)</h2>
+<div id="imessage"></div>
+
+<div class="row">
+    <div class="oneq col-md-6">{{=XML(current_question['htmlsrc'])}}</div>
+
+    <div class="col-md-6">
+        <p>
+            Please provide an explanation for why you answered
+            <span id="current_answer">__</span>
+        </p>
+        <textarea id="messageText" rows="2" cols="40"> </textarea> <br />
+        <button type="button" onclick="showPeerEnableVote2()">Submit</button>
+        <div>
+            <h4>Another Student's Justification for you to consider</h4>
+            <p id="peerName"></p>
+            <p id="peerJust"></p>
+            <p id="nextStep"></p>
+        </div>
+    </div>
+</div>
+
+<div>
+    <form action="/peer/peer_async">
+        <input type="hidden" name="assignment_id" value="{{=assignment_id}}" />
+        <input type="hidden" name="question_num" value="{{=nextQnum}}" />
+        <button type="submit">Next Question</button>
+    </form>
+</div>
+
+<script src="/runestone/static/js/peer.js?v={{=request.peer_mtime}}"></script>
+<script>
+    var user = "{{=auth.user.username}}";
+    var currentQuestion = "{{=XML(current_question.name)}}";
+    document.addEventListener("DOMContentLoaded", function (event) {
+        setTimeout(connect, 1000);
+    });
+    var studentVoteCount = 1;
+    var nextQuestionNumber = {{= nextQnum}};
+
+    // this cannot happen until the event that indicates components are loaded
+    $(document).on("runestone:login-complete", function () {
+        setTimeout(function () {
+            $(window.mcList[currentQuestion].submitButton).click(function () {
+                if (studentVoteCount == 1) {
+                    let currAnswer = window.mcList[currentQuestion].answer;
+                    console.log(`current answer is ${currAnswer}`);
+                    let sAnswer = answerToString(currAnswer);
+                    console.log(sAnswer);
+                    $("#current_answer").html(sAnswer)
+                }
+            })
+        }, 2000)
+    });
+</script>
